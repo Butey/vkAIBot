@@ -14,6 +14,7 @@ from google.generativeai.types import HarmCategory, HarmBlockThreshold
 import requests
 from dotenv import load_dotenv
 from functools import wraps
+from openai import OpenAI
 
 # Загрузка переменных окружения
 load_dotenv()
@@ -21,10 +22,12 @@ load_dotenv()
 # ==================== КОНФИГУРАЦИЯ ====================
 VK_TOKEN = os.getenv('VK_TOKEN')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+NVIDIA_API_KEY = os.getenv('NVIDIA_API_KEY')
 ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD', 'admin123')
 SECRET_KEY = os.getenv('SECRET_KEY', os.urandom(24).hex())
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
 MAX_CONTENT_LENGTH = 16 * 1024 * 1024  # 16MB
+DEFAULT_MODEL = os.getenv('DEFAULT_MODEL', 'google/gemini-1.5-flash')
 
 # Доверенные хосты для загрузки изображений (ВК)
 TRUSTED_HOSTS = [
@@ -53,6 +56,7 @@ class SecureFilter(logging.Filter):
             (r'vk_token[=:]\s*[A-Za-z0-9_-]+', 'vk_token=***'),
             (r'api_key[=:]\s*[A-Za-z0-9_-]+', 'api_key=***'),
             (r'GEMINI_API_KEY[=:]\s*[A-Za-z0-9_-]+', 'GEMINI_API_KEY=***'),
+            (r'NVIDIA_API_KEY[=:]\s*[A-Za-z0-9_-]+', 'NVIDIA_API_KEY=***'),
             (r'ADMIN_PASSWORD[=:]\s*[A-Za-z0-9_-]+', 'ADMIN_PASSWORD=***'),
             (r'session[=:]\s*[A-Za-z0-9_-]+', 'session=***'),
         ]
@@ -97,6 +101,67 @@ try:
 except Exception as e:
     logger.error(f"Ошибка инициализации Google Gemini: {e}")
     gemini_model = None
+
+# Инициализация NVIDIA NIM клиента (OpenAI-compatible API)
+nvidia_client = None
+if NVIDIA_API_KEY:
+    try:
+        nvidia_client = OpenAI(
+            api_key=NVIDIA_API_KEY,
+            base_url="https://integrate.api.nvidia.com/v1"
+        )
+        logger.info("NVIDIA NIM API инициализирован успешно")
+    except Exception as e:
+        logger.error(f"Ошибка инициализации NVIDIA NIM API: {e}")
+        nvidia_client = None
+else:
+    logger.warning("NVIDIA_API_KEY не указан. Модели NVIDIA будут недоступны.")
+
+# Список доступных моделей NVIDIA NIM
+NVIDIA_MODELS = [
+    "google/gemma-7b",
+    "meta/llama3-8b-instruct",
+    "meta/llama3-70b-instruct",
+    "mistralai/mistral-large",
+    "mistralai/mixtral-8x7b-instruct-v0.1",
+    "microsoft/phi-3-mini-128k-instruct",
+    "microsoft/phi-3-medium-128k-instruct",
+    "nvidia/nemotron-4-340b-instruct",
+    "databricks/dbrx-instruct",
+    "snowflake/arctic",
+    "ibm/granite-34b-code-instruct",
+    "google/codegemma-7b",
+    "google/paligemma",
+    "adept/cosmos-1.0",
+    "nv-mistralai/mistral-nemo-12b-instruct",
+    "qwen/qwen2-7b-instruct",
+    "qwen/qwen2-72b-instruct",
+    "aisingapore/sea-lion-7b-instruct",
+    "thudm/chatglm3-6b",
+    "zyphra/zamba-7b-instruct",
+    "meta/llama-3.1-8b-instruct",
+    "meta/llama-3.1-70b-instruct",
+    "meta/llama-3.1-405b-instruct",
+    "google/gemma-2-9b-it",
+    "google/gemma-2-27b-it",
+    "google/gemma-2b-it",
+    "google/codegemma-1.1-7b",
+    "google/recurrentgemma-2b",
+    "mistralai/mistral-7b-instruct-v0.2",
+    "mistralai/mistral-7b-instruct-v0.3",
+    "mistralai/codestral-22b-instruct-v0.1",
+    "mistralai/mathstral-7b-v0.1",
+    "nvidia/nemotron-mini-4b-instruct",
+    "nvidia/userraya-llama3-70b",
+    "baichuan-inc/baichuan2-13b-chat",
+    "writer/palmyra-med-70b-32k",
+    "writer/palmyra-fin-70b-32k",
+    "salesforce/llama-xlam-8b",
+    "upstage/solar-10.7b-instruct",
+    "seallms/seallm-7b-v2.5",
+    "rakuten/rakutenai-7b-chat",
+    "aisingapore/sea-lion-7b-instruct",
+]
 
 # ==================== ФУНКЦИИ БЕЗОПАСНОСТИ ====================
 def is_safe_url(url):
@@ -242,6 +307,55 @@ def logs():
                                   escape=escape_html,
                                   csrf_token=csrf_token)
 
+def get_nvidia_response(message, user_id, model_name=None):
+    """Получение ответа от NVIDIA NIM API"""
+    if not nvidia_client:
+        return "NVIDIA API не инициализирован. Проверьте NVIDIA_API_KEY."
+    
+    try:
+        stats['active_users'].add(user_id)
+        stats['total_messages'] += 1
+        
+        # Используем модель по умолчанию или указанную
+        model = model_name if model_name and model_name in NVIDIA_MODELS else DEFAULT_MODEL
+        
+        # Если модель не из списка NVIDIA, пробуем использовать её напрямую
+        if model not in NVIDIA_MODELS and '/' in model:
+            pass  # Разрешаем кастомные модели в формате provider/model
+        
+        response = nvidia_client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "Ты полезный ассистент в ВКонтакте. Отвечай на русском языке кратко и по делу."},
+                {"role": "user", "content": message}
+            ],
+            temperature=0.7,
+            max_tokens=1024,
+            top_p=0.9
+        )
+        
+        return response.choices[0].message.content
+    except Exception as e:
+        error_msg = f"Ошибка NVIDIA NIM для пользователя {user_id}: {str(e)}"
+        logger.error(error_msg)
+        stats['errors'].append({
+            'timestamp': datetime.now().isoformat(),
+            'message': error_msg
+        })
+        return "Извините, произошла ошибка при обработке вашего запроса через NVIDIA API."
+
+def get_llm_response(message, user_id, image_data=None, model_name=None):
+    """Универсальная функция получения ответа от LLM (Gemini или NVIDIA)"""
+    # Определяем, какую модель использовать
+    use_nvidia = model_name and (model_name in NVIDIA_MODELS or '/' in model_name)
+    
+    if use_nvidia and nvidia_client:
+        return get_nvidia_response(message, user_id, model_name)
+    elif gemini_model:
+        return get_gemini_response(message, user_id, image_data)
+    else:
+        return "LLM сервисы не настроены. Проверьте API ключи."
+
 # ==================== LLM ИНТЕГРАЦИЯ ====================
 def get_gemini_response(message, user_id, image_data=None):
     """Получение ответа от Google Gemini с поддержкой изображений"""
@@ -331,7 +445,9 @@ def process_message(event):
         # Получаем ответ от Gemini
         if message_text or image_data:
             query = message_text if message_text else "Опиши это изображение"
-            response = get_gemini_response(query, user_id, image_data)
+            # Получаем модель из переменной окружения или используем по умолчанию
+            model_name = DEFAULT_MODEL
+            response = get_llm_response(query, user_id, image_data, model_name)
             
             # Отправляем ответ пользователю
             if vk:
