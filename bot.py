@@ -7,7 +7,8 @@ from urllib.parse import urlparse
 from flask import Flask, request, render_template_string, session, redirect, url_for, flash
 from werkzeug.utils import secure_filename
 import vk_api
-from vk_api.bot_helper import BotHelper
+from vk_api import VkApi
+from vk_api.bot_longpoll import VkBotLongPoll, VkBotEventType
 from vk_api.upload import VkUpload
 import google.generativeai as genai
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
@@ -524,9 +525,9 @@ def download_image_secure(url):
 def process_message(event):
     """Обработка входящего сообщения с автоматическим выбором модели"""
     try:
-        user_id = event.obj.get('peer_id')
-        message_text = event.obj.get('text', '')
-        attachments = event.obj.get('attachments', [])
+        user_id = event.obj.message.get('peer_id')
+        message_text = event.obj.message.get('text', '')
+        attachments = event.obj.message.get('attachments', [])
         
         if not user_id:
             return
@@ -588,11 +589,12 @@ def main():
         logger.error("VK API не инициализирован. Проверьте токен.")
         return
     
-    # Использование long polling для получения сообщений
-    lp = vk_api.longpoll.LongPoll(vk_session)
+    # Использование Bot Long Polling для получения сообщений
+    group_id = int(vk_session.method('groups.getById')[0]['group_id'])
+    lp = VkBotLongPoll(vk_session, group_id)
     
     for event in lp.listen():
-        if event.type == vk_api.longpoll.LongpollEvent.MESSAGE_EVENT:
+        if event.type == VkBotEventType.MESSAGE_NEW:
             process_message(event)
 
 # ==================== HTML ШАБЛОНЫ ====================
