@@ -117,7 +117,7 @@ if NVIDIA_API_KEY:
 else:
     logger.warning("NVIDIA_API_KEY не указан. Модели NVIDIA будут недоступны.")
 
-# Список доступных моделей NVIDIA NIM
+# Список доступных моделей NVIDIA NIM с категориями
 NVIDIA_MODELS = [
     "google/gemma-7b",
     "meta/llama3-8b-instruct",
@@ -162,6 +162,112 @@ NVIDIA_MODELS = [
     "rakuten/rakutenai-7b-chat",
     "aisingapore/sea-lion-7b-instruct",
 ]
+
+# Категории моделей для разных задач
+MODEL_CATEGORIES = {
+    'code': [
+        'ibm/granite-34b-code-instruct',
+        'google/codegemma-7b',
+        'google/codegemma-1.1-7b',
+        'mistralai/codestral-22b-instruct-v0.1',
+    ],
+    'math': [
+        'mistralai/mathstral-7b-v0.1',
+        'meta/llama-3.1-405b-instruct',
+        'meta/llama-3.1-70b-instruct',
+        'nvidia/nemotron-4-340b-instruct',
+    ],
+    'creative': [
+        'meta/llama-3.1-405b-instruct',
+        'mistralai/mistral-large',
+        'meta/llama3-70b-instruct',
+        'google/gemma-2-27b-it',
+    ],
+    'fast': [
+        'microsoft/phi-3-mini-128k-instruct',
+        'meta/llama3-8b-instruct',
+        'google/gemma-2b-it',
+        'nvidia/nemotron-mini-4b-instruct',
+    ],
+    'vision': [
+        'google/paligemma',
+        'adept/cosmos-1.0',
+    ],
+    'general': [
+        'meta/llama-3.1-70b-instruct',
+        'mistralai/mixtral-8x7b-instruct-v0.1',
+        'google/gemma-2-9b-it',
+        'qwen/qwen2-72b-instruct',
+    ],
+}
+
+def detect_task_type(message, has_image=False):
+    """
+    Определение типа задачи по сообщению пользователя
+    Возвращает: 'code', 'math', 'creative', 'vision', 'general'
+    """
+    message_lower = message.lower() if message else ''
+    
+    # Если есть изображение - задача на анализ vision
+    if has_image:
+        return 'vision'
+    
+    # Ключевые слова для кода
+    code_keywords = ['код', 'программ', 'скрипт', 'функци', 'класс', 'дебаг', 'ошибк', 
+                     'python', 'javascript', 'java', 'c++', 'html', 'css', 'sql',
+                     'напиши код', 'создай функцию', 'исправь ошибку', 'рефактор',
+                     'import', 'def ', 'class ', 'function', 'var ', 'let ', 'const ']
+    
+    # Ключевые слова для математики
+    math_keywords = ['реши', 'уравнени', 'вычисли', 'посчитай', 'математик', 'алгебр',
+                     'геометр', 'интеграл', 'производн', 'формула', 'числ', 'калькулятор',
+                     '√', '∑', '∫', 'π', '°', 'радиан', 'синус', 'косинус', 'тангенс']
+    
+    # Ключевые слова для креативных задач
+    creative_keywords = ['придумай', 'напиши стих', 'рассказ', 'историю', 'сценарий',
+                         'креатив', 'творчеств', 'поэзия', 'стихотворени', 'песню',
+                         'описание', 'маркетинг', 'копирайт', 'слоган', 'нейминг']
+    
+    # Проверка на код
+    code_score = sum(1 for kw in code_keywords if kw in message_lower)
+    if code_score >= 1 or any(x in message_lower for x in ['```', 'import ', 'def ', 'function']):
+        return 'code'
+    
+    # Проверка на математику
+    math_score = sum(1 for kw in math_keywords if kw in message_lower)
+    if math_score >= 2 or any(x in message_lower for x in ['=', '+', '-', '*', '/', '²', '³']):
+        return 'math'
+    
+    # Проверка на креатив
+    creative_score = sum(1 for kw in creative_keywords if kw in message_lower)
+    if creative_score >= 1:
+        return 'creative'
+    
+    # Проверка на короткий быстрый вопрос
+    if len(message_lower.split()) <= 3:
+        return 'fast'
+    
+    # По умолчанию - общая задача
+    return 'general'
+
+def get_optimal_model(task_type, has_image=False):
+    """
+    Получение оптимальной модели для типа задачи
+    """
+    # Для изображений всегда используем Gemini или специализированные vision модели
+    if has_image and gemini_model:
+        return 'google/gemini-1.5-flash'
+    
+    # Получаем список моделей для категории
+    models = MODEL_CATEGORIES.get(task_type, MODEL_CATEGORIES['general'])
+    
+    # Выбираем первую доступную модель из списка
+    for model in models:
+        if model in NVIDIA_MODELS and nvidia_client:
+            return model
+    
+    # Fallback на модель по умолчанию
+    return DEFAULT_MODEL
 
 # ==================== ФУНКЦИИ БЕЗОПАСНОСТИ ====================
 def is_safe_url(url):
@@ -416,7 +522,7 @@ def download_image_secure(url):
 
 # ==================== ОСНОВНОЙ ЦИКЛ БОТА ====================
 def process_message(event):
-    """Обработка входящего сообщения"""
+    """Обработка входящего сообщения с автоматическим выбором модели"""
     try:
         user_id = event.obj.get('peer_id')
         message_text = event.obj.get('text', '')
@@ -442,12 +548,20 @@ def process_message(event):
                         logger.info("Изображение загружено успешно")
                     break
         
-        # Получаем ответ от Gemini
+        # Определяем тип задачи и выбираем оптимальную модель
+        has_image = image_data is not None
+        task_type = detect_task_type(message_text, has_image)
+        model_name = get_optimal_model(task_type, has_image)
+        
+        logger.info(f"Тип задачи: {task_type}, выбрана модель: {model_name}")
+        
+        # Получаем ответ от LLM
         if message_text or image_data:
             query = message_text if message_text else "Опиши это изображение"
-            # Получаем модель из переменной окружения или используем по умолчанию
-            model_name = DEFAULT_MODEL
             response = get_llm_response(query, user_id, image_data, model_name)
+            
+            # Добавляем информацию о выбранной модели (опционально, можно убрать)
+            # response = f"[{model_name.split('/')[-1]}] {response}"
             
             # Отправляем ответ пользователю
             if vk:
@@ -456,7 +570,7 @@ def process_message(event):
                     message=response,
                     random_id=0
                 )
-                logger.info(f"Отправлен ответ пользователю {user_id}")
+                logger.info(f"Отправлен ответ пользователю {user_id} (модель: {model_name})")
         
     except Exception as e:
         error_msg = f"Ошибка обработки сообщения: {str(e)}"
